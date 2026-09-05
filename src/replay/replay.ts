@@ -2,6 +2,7 @@ import { chromium, type Browser, type Page } from "@playwright/test";
 import type { CapabilityArtifact, CapabilityStep, Condition, ErrorMapping, Extraction, JsonValue } from "../artifact/schema.js";
 import type { EvidenceLogger } from "../evidence/index.js";
 import { createEvidenceLogger, redactRunInputs, redactRunOutputs } from "../evidence/index.js";
+import { handleHumanHandoff, type HandoffMode } from "../handoff/index.js";
 import { evaluateStepPolicy } from "../policy/index.js";
 import type { EvidenceRef, RunResult, StepObservation, StepResult } from "./result.js";
 import { resolveTarget, resolveVisibleTarget } from "./locator.js";
@@ -15,6 +16,7 @@ export type ReplayOptions = {
   runId?: string;
   keepBrowserOpen?: boolean;
   stepTimeoutMs?: number;
+  handoffMode?: HandoffMode;
 };
 
 export async function replayCapability(options: ReplayOptions): Promise<RunResult> {
@@ -70,8 +72,22 @@ export async function replayCapability(options: ReplayOptions): Promise<RunResul
       }
 
       if (result.status === "requires_human") {
-        const requestRef = await writeInterventionRequest(logger, artifact, step, result, outputs);
-        return finishRequiresHuman(logger, steps, outputs, artifact, startedAt, result.errorCode ?? "requires_human", result.message, step.id, requestRef.path, [artifactRef, requestRef]);
+        const handoff = await handleHumanHandoff({
+          mode: options.handoffMode ?? "off",
+          page,
+          logger,
+          artifact,
+          step,
+          result,
+          outputs
+        });
+
+        if (!handoff.resumed) {
+          return finishRequiresHuman(logger, steps, outputs, artifact, startedAt, result.errorCode ?? "requires_human", result.message, step.id, handoff.requestRef.path, [artifactRef, ...handoff.evidence]);
+        }
+
+        steps.push(buildSyntheticStepResult(step, "recoverable", handoff.message, outputs, handoff.evidence));
+        continue;
       }
 
       if (result.status === "failure") {
@@ -304,33 +320,33 @@ async function captureFailureEvidence(logger: EvidenceLogger, page: Page, stepId
   return [screenshot, dom];
 }
 
-async function writeInterventionRequest(
-  logger: EvidenceLogger,
-  artifact: CapabilityArtifact,
-  step: CapabilityStep,
-  result: StepResult,
-  outputs: Record<string, JsonValue>
-): Promise<EvidenceRef> {
-  return logger.writeJson(
-    "intervention_request",
-    `${step.id}-intervention-request.json`,
-    {
-      capability: artifact.capability.name,
-      stepId: step.id,
-      reason: result.message,
-      observed: result.observed ?? null,
-      outputs: redactRunOutputs(artifact, outputs)
-    },
-    `Human intervention request for '${step.id}'.`
-  );
-}
-
 async function observe(page: Page): Promise<StepObservation> {
   return {
     url: page.url(),
     title: await page.title().catch(() => undefined),
     visibleText: await pageText(page).catch(() => undefined),
     evidence: []
+  };
+}
+
+function buildSyntheticStepResult(
+  step: CapabilityStep,
+  status: StepResult["status"],
+  message: string,
+  outputs: Record<string, JsonValue>,
+  evidence: EvidenceRef[]
+): StepResult {
+  const now = new Date().toISOString();
+  return {
+    stepId: `${step.id}-handoff`,
+    status,
+    action: "handoff",
+    message,
+    startedAt: now,
+    completedAt: now,
+    attempts: 1,
+    outputs: { ...outputs },
+    evidence
   };
 }
 
