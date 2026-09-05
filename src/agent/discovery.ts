@@ -32,7 +32,7 @@ export type DiscoveryResult = {
 };
 
 export async function runDiscovery(options: DiscoveryOptions): Promise<DiscoveryResult> {
-  const artifact = buildDiscoveryArtifact(options.baseUrl);
+  const artifact = buildDiscoveryArtifact(options.baseUrl, options.mock ?? false);
   const logger = await createEvidenceLogger({
     mode: "discovery",
     capabilityName: artifact.capability.name,
@@ -54,6 +54,7 @@ export async function runDiscovery(options: DiscoveryOptions): Promise<Discovery
     const page = await browser.newPage();
     page.setDefaultTimeout(10_000);
     page.setDefaultNavigationTimeout(10_000);
+    await page.goto(options.baseUrl, { waitUntil: "domcontentloaded" });
 
     for (let stepNumber = 1; stepNumber <= (options.maxSteps ?? 10); stepNumber += 1) {
       const observation = await observePage(page);
@@ -63,7 +64,9 @@ export async function runDiscovery(options: DiscoveryOptions): Promise<Discovery
         goal: options.goal,
         observation,
         stepNumber,
-        outputs: stringOutputs(outputs)
+        outputs: stringOutputs(outputs),
+        allowedBaseUrl: options.baseUrl,
+        allowedRoutes: artifact.policy.allowedRoutes
       });
       logger.writeEvent({ event: "llm_decision", message: action.rationale, data: action as unknown as JsonValue });
 
@@ -101,14 +104,14 @@ export async function runDiscovery(options: DiscoveryOptions): Promise<Discovery
   }
 }
 
-function buildDiscoveryArtifact(baseUrl: string): CapabilityArtifact {
+function buildDiscoveryArtifact(baseUrl: string, mock: boolean): CapabilityArtifact {
   const origin = new URL(baseUrl).origin;
   return CapabilityArtifactSchema.parse({
     ...lookupMemberSavingsBalanceArtifact,
     capability: {
       ...lookupMemberSavingsBalanceArtifact.capability,
       createdAt: new Date().toISOString(),
-      source: "llm_discovery"
+      source: mock ? "hybrid" : "llm_discovery"
     },
     targetApp: {
       ...lookupMemberSavingsBalanceArtifact.targetApp,
@@ -117,7 +120,10 @@ function buildDiscoveryArtifact(baseUrl: string): CapabilityArtifact {
     policy: {
       ...lookupMemberSavingsBalanceArtifact.policy,
       allowedOrigins: [origin]
-    }
+    },
+    notes: mock
+      ? "Generated through the discovery loop with deterministic mock decisions because OPENAI_API_KEY was unavailable. Replace with a real OpenAI discovery run before final submission."
+      : "Generated through the OpenAI-backed discovery loop."
   });
 }
 

@@ -1,0 +1,13 @@
+{
+  "capability": "lookup_member_savings_balance",
+  "stepId": "open-member-detail",
+  "reason": "A restricted member dialog requires human review before automation continues.",
+  "controlState": "automation_paused",
+  "observed": {
+    "url": "http://localhost:3000/members/22222",
+    "title": "Northstar CoreServicing",
+    "visibleText": "[REDACTED_VISIBLE_TEXT length=587]",
+    "evidence": []
+  },
+  "outputs": {}
+}

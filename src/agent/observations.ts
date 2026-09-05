@@ -14,6 +14,7 @@ export type ObservedControl = {
   name?: string;
   href?: string;
   type?: string;
+  value?: string;
 };
 
 export async function observePage(page: Page): Promise<BrowserObservation> {
@@ -33,7 +34,8 @@ export async function observePage(page: Page): Promise<BrowserObservation> {
           label,
           name: input.name || undefined,
           href: element instanceof HTMLAnchorElement ? element.href : undefined,
-          type: input.type || undefined
+          type: input.type || undefined,
+          value: "value" in input ? input.value || undefined : undefined
         };
       });
     }).catch(() => [])
