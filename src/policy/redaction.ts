@@ -5,6 +5,7 @@ export type RedactionMode = "none" | "partial" | "full";
 const secretPatterns = [
   /\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b/g,
   /\b(?:\d[ -]*?){13,19}\b/g,
+  /\$[0-9,]+\.[0-9]{2}/g,
   /\b(?:api[_-]?key|token|secret|password)\s*[:=]\s*[^\s,;}]+/gi
 ];
 
