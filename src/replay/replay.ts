@@ -19,9 +19,10 @@ export type ReplayOptions = {
 
 export async function replayCapability(options: ReplayOptions): Promise<RunResult> {
   const startedAt = new Date();
+  const artifact = withEffectiveBaseUrl(options.artifact, options.baseUrl);
   const logger = await createEvidenceLogger({
     mode: "replay",
-    capabilityName: options.artifact.capability.name,
+    capabilityName: artifact.capability.name,
     baseDir: options.evidenceDir,
     runId: options.runId,
     startedAt
@@ -33,24 +34,24 @@ export async function replayCapability(options: ReplayOptions): Promise<RunResul
   logger.writeEvent({
     event: "replay_inputs",
     message: "Replay started with redacted inputs.",
-    data: redactRunInputs(options.artifact, options.inputs)
+    data: redactRunInputs(artifact, options.inputs)
   });
-  const artifactRef = await logger.writeArtifact(options.artifact);
+  const artifactRef = await logger.writeArtifact(artifact);
 
   try {
     browser = await chromium.launch({ headless: !options.headed });
     const page = await browser.newPage();
     page.setDefaultTimeout(options.stepTimeoutMs ?? 10_000);
     page.setDefaultNavigationTimeout(options.stepTimeoutMs ?? 10_000);
-    const baseUrl = options.baseUrl ?? options.artifact.targetApp.baseUrl;
+    const baseUrl = artifact.targetApp.baseUrl;
 
     if (!baseUrl) {
-      return await finishFailure(logger, steps, outputs, options.artifact, startedAt, "missing_base_url", "Artifact does not define a base URL.");
+      return await finishFailure(logger, steps, outputs, artifact, startedAt, "missing_base_url", "Artifact does not define a base URL.");
     }
 
-    for (const step of options.artifact.steps) {
+    for (const step of artifact.steps) {
       const result = await withTimeout(
-        executeStep({ step, page, baseUrl, options, logger, outputs }),
+        executeStep({ step, page, baseUrl, artifact, inputs: options.inputs, logger, outputs }),
         options.stepTimeoutMs ?? 15_000,
         `Step '${step.id}' exceeded replay timeout.`
       );
@@ -60,34 +61,34 @@ export async function replayCapability(options: ReplayOptions): Promise<RunResul
         stepId: step.id,
         status: result.status,
         message: result.message,
-        data: redactRunOutputs(options.artifact, result.outputs),
+        data: redactRunOutputs(artifact, result.outputs),
         evidence: result.evidence
       });
 
       if (result.status === "business_outcome") {
-        return finishBusinessOutcome(logger, steps, outputs, options.artifact, startedAt, result.errorCode ?? "business_outcome", result.message, [artifactRef]);
+        return finishBusinessOutcome(logger, steps, outputs, artifact, startedAt, result.errorCode ?? "business_outcome", result.message, [artifactRef]);
       }
 
       if (result.status === "requires_human") {
-        const requestRef = await writeInterventionRequest(logger, options.artifact, step, result, outputs);
-        return finishRequiresHuman(logger, steps, outputs, options.artifact, startedAt, result.errorCode ?? "requires_human", result.message, step.id, requestRef.path, [artifactRef, requestRef]);
+        const requestRef = await writeInterventionRequest(logger, artifact, step, result, outputs);
+        return finishRequiresHuman(logger, steps, outputs, artifact, startedAt, result.errorCode ?? "requires_human", result.message, step.id, requestRef.path, [artifactRef, requestRef]);
       }
 
       if (result.status === "failure") {
         const refs = await captureFailureEvidence(logger, page, step.id);
-        return finishFailure(logger, steps, outputs, options.artifact, startedAt, result.errorCode ?? "step_failed", result.message, step.id, undefined, undefined, [artifactRef, ...refs]);
+        return finishFailure(logger, steps, outputs, artifact, startedAt, result.errorCode ?? "step_failed", result.message, step.id, undefined, undefined, [artifactRef, ...refs]);
       }
     }
 
-    const success = await conditionMet(page, options.artifact.successCondition, outputs);
+    const success = await conditionMet(page, artifact.successCondition, outputs);
     if (!success) {
       const refs = await captureFailureEvidence(logger, page, "success-condition");
-      return finishFailure(logger, steps, outputs, options.artifact, startedAt, "success_condition_not_met", options.artifact.successCondition.description, undefined, options.artifact.successCondition.description, await pageText(page), [artifactRef, ...refs]);
+      return finishFailure(logger, steps, outputs, artifact, startedAt, "success_condition_not_met", artifact.successCondition.description, undefined, artifact.successCondition.description, await pageText(page), [artifactRef, ...refs]);
     }
 
-    return finishSuccess(logger, steps, outputs, options.artifact, startedAt, [artifactRef]);
+    return finishSuccess(logger, steps, outputs, artifact, startedAt, [artifactRef]);
   } catch (error) {
-    return finishFailure(logger, steps, outputs, options.artifact, startedAt, "unhandled_replay_error", errorMessage(error), undefined, undefined, undefined, [artifactRef]);
+    return finishFailure(logger, steps, outputs, artifact, startedAt, "unhandled_replay_error", errorMessage(error), undefined, undefined, undefined, [artifactRef]);
   } finally {
     if (browser && !options.keepBrowserOpen) {
       await browser.close();
@@ -96,17 +97,37 @@ export async function replayCapability(options: ReplayOptions): Promise<RunResul
   }
 }
 
+function withEffectiveBaseUrl(artifact: CapabilityArtifact, baseUrlOverride: string | undefined): CapabilityArtifact {
+  if (!baseUrlOverride) {
+    return artifact;
+  }
+
+  const origin = new URL(baseUrlOverride).origin;
+  return {
+    ...artifact,
+    targetApp: {
+      ...artifact.targetApp,
+      baseUrl: baseUrlOverride
+    },
+    policy: {
+      ...artifact.policy,
+      allowedOrigins: [origin]
+    }
+  };
+}
+
 async function executeStep(context: {
   step: CapabilityStep;
   page: Page;
   baseUrl: string;
-  options: ReplayOptions;
+  artifact: CapabilityArtifact;
+  inputs: Record<string, JsonValue>;
   logger: EvidenceLogger;
   outputs: Record<string, JsonValue>;
 }): Promise<StepResult> {
-  const { step, page, baseUrl, options, outputs } = context;
+  const { step, page, baseUrl, artifact, inputs, outputs } = context;
   const startedAt = new Date();
-  const policyDecision = evaluateStepPolicy(options.artifact, step);
+  const policyDecision = evaluateStepPolicy(artifact, step);
 
   if (!policyDecision.allowed) {
     return buildStepResult(step, "failure", startedAt, policyDecision.reason, outputs, policyDecision.code, await observe(page));
@@ -117,7 +138,7 @@ async function executeStep(context: {
   }
 
   try {
-    await performAction(page, step, baseUrl, options.inputs, outputs);
+    await performAction(page, step, baseUrl, inputs, outputs);
 
     if (step.waitAfterMs > 0) {
       await page.waitForTimeout(step.waitAfterMs);
